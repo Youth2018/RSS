@@ -1,6 +1,6 @@
 /**
- * 数据持久化存储模块
- * 使用Koishi内置数据库进行数据存储
+ * ?????????
+ * ??Koishi???????????
  */
 
 import { Context } from 'koishi'
@@ -23,10 +23,10 @@ declare module 'koishi' {
 }
 
 /**
- * 注册数据库模型
+ * ???????
  */
 export function registerModels(ctx: Context): void {
-  // 扩展RSS源模型
+  // ??RSS???
   ctx.model.extend('rss_source', {
     id: 'string',
     url: 'string',
@@ -37,7 +37,7 @@ export function registerModels(ctx: Context): void {
     unique: ['url'],
   })
 
-  // 群组订阅模型
+  // ??????
   ctx.model.extend('rss_group', {
     id: 'unsigned',
     groupId: 'string',
@@ -49,7 +49,7 @@ export function registerModels(ctx: Context): void {
     autoInc: true,
   })
 
-  // 已发送记录模型
+  // ???????
   ctx.model.extend('rss_sent_record', {
     id: 'unsigned',
     sourceId: 'string',
@@ -60,7 +60,7 @@ export function registerModels(ctx: Context): void {
     autoInc: true,
   })
 
-  // 插件设置模型
+  // ??????
   ctx.model.extend('rss_settings', {
     id: 'unsigned',
     checkInterval: 'unsigned',
@@ -75,7 +75,7 @@ export function registerModels(ctx: Context): void {
 }
 
 /**
- * 获取插件设置（若不存在则创建默认设置）
+ * ??????(???????????)
  */
 export async function getSettings(ctx: Context): Promise<PluginSettings> {
   const settings = await ctx.database.get('rss_settings', {}, { limit: 1 })
@@ -87,7 +87,7 @@ export async function getSettings(ctx: Context): Promise<PluginSettings> {
 }
 
 /**
- * 更新插件设置
+ * ??????
  */
 export async function updateSettings(
   ctx: Context,
@@ -98,21 +98,21 @@ export async function updateSettings(
 }
 
 /**
- * 获取所有启用的RSS源
+ * ???????RSS?
  */
 export async function getEnabledSources(ctx: Context): Promise<RSSSource[]> {
   return ctx.database.get('rss_source', { enabled: true })
 }
 
 /**
- * 获取所有RSS源
+ * ????RSS?
  */
 export async function getAllSources(ctx: Context): Promise<RSSSource[]> {
   return ctx.database.get('rss_source', {})
 }
 
 /**
- * 初始化RSS源（添加默认源中不存在的）
+ * ???RSS?(??????????)
  */
 export async function initSources(ctx: Context): Promise<void> {
   const existing = await ctx.database.get('rss_source', {})
@@ -132,28 +132,43 @@ export async function initSources(ctx: Context): Promise<void> {
 }
 
 /**
- * 添加RSS源
+ * ??RSS?
+ * ?????URL???,??UNIQUE constraint??
  */
 export async function addSource(
   ctx: Context,
   source: Omit<RSSSource, 'id'>,
 ): Promise<RSSSource> {
+  // ??URL?????
+  const existingByUrl = await ctx.database.get('rss_source', { url: source.url })
+  if (existingByUrl.length > 0) {
+    throw new Error(`RSS?URL???: ${source.url}(???: ${existingByUrl[0].name})`)
+  }
+
   const id = source.name.toLowerCase().replace(/[^a-z0-9_]/g, '_')
-  return ctx.database.create('rss_source', { id, ...source }) as unknown as RSSSource
+
+  // ??ID?????,????????
+  let finalId = id
+  const existingById = await ctx.database.get('rss_source', { id: finalId })
+  if (existingById.length > 0) {
+    finalId = `${id}_${Date.now()}`
+  }
+
+  return ctx.database.create('rss_source', { id: finalId, ...source }) as unknown as RSSSource
 }
 
 /**
- * 删除RSS源
+ * ??RSS?
  */
 export async function removeSource(ctx: Context, sourceId: string): Promise<number> {
   const result = await ctx.database.remove('rss_source', { id: sourceId })
-  // 同时删除该源的相关发送记录
+  // ?????????????
   await ctx.database.remove('rss_sent_record', { sourceId })
   return result.removed ?? 0
 }
 
 /**
- * 切换RSS源启用/停用状态
+ * ??RSS???/????
  */
 export async function toggleSource(ctx: Context, sourceId: string, enabled?: boolean): Promise<RSSSource | null> {
   const sources = await ctx.database.get('rss_source', { id: sourceId })
@@ -167,7 +182,7 @@ export async function toggleSource(ctx: Context, sourceId: string, enabled?: boo
 }
 
 /**
- * 获取单个RSS源
+ * ????RSS?
  */
 export async function getSource(ctx: Context, sourceId: string): Promise<RSSSource | null> {
   const sources = await ctx.database.get('rss_source', { id: sourceId })
@@ -175,27 +190,27 @@ export async function getSource(ctx: Context, sourceId: string): Promise<RSSSour
 }
 
 /**
- * 获取所有启用的群组
+ * ?????????
  */
 export async function getEnabledGroups(ctx: Context): Promise<GroupSubscription[]> {
   return ctx.database.get('rss_group', { enabled: true })
 }
 
 /**
- * 获取所有群组
+ * ??????
  */
 export async function getAllGroups(ctx: Context): Promise<GroupSubscription[]> {
   return ctx.database.get('rss_group', {})
 }
 
 /**
- * 添加群组订阅
+ * ??????
  */
 export async function addGroup(
   ctx: Context,
   groupId: string,
 ): Promise<GroupSubscription> {
-  // 检查是否已存在
+  // ???????
   const existing = await ctx.database.get('rss_group', { groupId })
   if (existing.length > 0) {
     if (!existing[0].enabled) {
@@ -212,7 +227,7 @@ export async function addGroup(
 }
 
 /**
- * 批量添加群组
+ * ??????
  */
 export async function addGroups(
   ctx: Context,
@@ -247,7 +262,7 @@ export async function addGroups(
 }
 
 /**
- * 移除群组订阅（软删除，设置为禁用）
+ * ??????(???,?????)
  */
 export async function removeGroup(
   ctx: Context,
@@ -258,7 +273,7 @@ export async function removeGroup(
 }
 
 /**
- * 批量移除群组
+ * ??????
  */
 export async function removeGroups(
   ctx: Context,
@@ -275,7 +290,7 @@ export async function removeGroups(
 }
 
 /**
- * 检查条目是否已发送
+ * ?????????
  */
 export async function isItemSent(
   ctx: Context,
@@ -287,7 +302,7 @@ export async function isItemSent(
 }
 
 /**
- * 记录已发送条目
+ * ???????
  */
 export async function recordSentItem(
   ctx: Context,
@@ -302,7 +317,7 @@ export async function recordSentItem(
 }
 
 /**
- * 清理过期的发送记录（保留最近30天的记录）
+ * ?????????(????30????)
  */
 export async function cleanOldRecords(ctx: Context): Promise<number> {
   const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000
@@ -313,7 +328,7 @@ export async function cleanOldRecords(ctx: Context): Promise<number> {
 }
 
 /**
- * 获取发送统计
+ * ??????
  */
 export async function getSentCount(ctx: Context): Promise<number> {
   const records = await ctx.database.get('rss_sent_record', {}, {

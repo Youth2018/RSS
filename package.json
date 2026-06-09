@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-rss-subscribe",
-  "version": "1.0.3",
-  "description": "自用RSS订阅 - Koishi v4 RSS订阅推送插件，支持QQ官方机器人Markdown格式消息发送，定时抓取RSS源并推送新内容到指定群聊",
+  "version": "1.1.0",
+  "description": "??RSS?? - Koishi v4 RSS??????,??QQ?????Markdown??????,????RSS????????????",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "files": [
@@ -47,7 +47,7 @@
   },
   "koishi": {
     "description": {
-      "zh-CN": "自用RSS订阅 - 定时抓取RSS源并将新内容以QQ Markdown格式推送到指定群聊，支持Nitter/Twitter源适配、图床上传、源管理",
+      "zh-CN": "??RSS?? - ????RSS???????QQ Markdown?????????,??Nitter/Twitter????????????",
       "en": "Personal RSS subscription - Periodically fetch RSS feeds and push new content to QQ groups in Markdown format, with Nitter/Twitter source adaptation and image hosting"
     },
     "service": {
