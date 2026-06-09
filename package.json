@@ -1,0 +1,59 @@
+{
+  "name": "koishi-plugin-rss-subscribe",
+  "version": "1.0.2",
+  "description": "自用RSS订阅 - Koishi v4 RSS订阅推送插件，支持QQ官方机器人Markdown格式消息发送，定时抓取RSS源并推送新内容到指定群聊",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "files": [
+    "lib",
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rimraf lib"
+  },
+  "keywords": [
+    "koishi",
+    "koishi-plugin",
+    "rss",
+    "rss-subscribe",
+    "qq",
+    "markdown",
+    "nitter",
+    "roblox",
+    "bot"
+  ],
+  "author": "ningmu",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Youth2018/RSS.git"
+  },
+  "homepage": "https://github.com/Youth2018/RSS#readme",
+  "bugs": {
+    "url": "https://github.com/Youth2018/RSS/issues"
+  },
+  "peerDependencies": {
+    "koishi": "^4.0.0"
+  },
+  "dependencies": {
+    "rss-parser": "^3.13.0"
+  },
+  "devDependencies": {
+    "koishi": "^4.18.0",
+    "rimraf": "^5.0.0",
+    "typescript": "^5.0.0"
+  },
+  "koishi": {
+    "description": {
+      "zh-CN": "自用RSS订阅 - 定时抓取RSS源并将新内容以QQ Markdown格式推送到指定群聊，支持Nitter/Twitter源适配、图床上传、源管理",
+      "en": "Personal RSS subscription - Periodically fetch RSS feeds and push new content to QQ groups in Markdown format, with Nitter/Twitter source adaptation and image hosting"
+    },
+    "service": {
+      "required": [
+        "database"
+      ]
+    }
+  }
+}
