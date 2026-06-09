@@ -68,7 +68,7 @@ export function convertToMarkdown(item: RSSItem, pushTitle?: string): string {
   if (item.imageUrls && item.imageUrls.length > 0) {
     for (const imgUrl of item.imageUrls) {
       if (imgUrl.startsWith('http')) {
-        lines.push(`![图片 #${QQ_IMAGE_WIDTH}px #${QQ_IMAGE_HEIGHT}px](${imgUrl})`)
+        lines.push(`![img #${QQ_IMAGE_WIDTH}px #${QQ_IMAGE_HEIGHT}px](${imgUrl})`)
         lines.push('')
       }
     }
@@ -135,7 +135,7 @@ export function convertBatchToMarkdown(items: RSSItem[], pushTitle?: string): st
     if (item.imageUrls && item.imageUrls.length > 0) {
       for (const imgUrl of item.imageUrls) {
         if (imgUrl.startsWith('http')) {
-          lines.push(`![图片 #${QQ_IMAGE_WIDTH}px #${QQ_IMAGE_HEIGHT}px](${imgUrl})`)
+          lines.push(`![img #${QQ_IMAGE_WIDTH}px #${QQ_IMAGE_HEIGHT}px](${imgUrl})`)
           lines.push('')
         }
       }

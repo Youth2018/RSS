@@ -283,7 +283,10 @@ async function sendMarkdownToGroup(
     throw new Error('没有可用的Bot实例')
   }
 
-  const content = h('markdown', {}, [h.text(markdown)])
+  // 使用 qq:rawmarkdown 元素发送原生Markdown内容
+  // 该元素直接将content字段作为markdown.content发送，不做转义
+  // 适配器会以 msg_type=2 (Markdown) 发送消息
+  const content = h('qq:rawmarkdown', { content: markdown })
 
   let sent = false
   let lastError: Error | null = null

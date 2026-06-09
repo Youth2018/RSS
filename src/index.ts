@@ -276,7 +276,7 @@ export function apply(ctx: Context, config: Config) {
         status.totalSent = totalSent
 
         const md = formatStatus(status)
-        return h('markdown', {}, [h.text(md)])
+        return h('qq:rawmarkdown', { content: md })
       } catch (error) {
         return `获取状态失败: ${(error as Error).message}`
       }
@@ -349,7 +349,7 @@ export function apply(ctx: Context, config: Config) {
       try {
         const groups = await getAllGroups(ctx)
         const md = formatGroupList(groups)
-        return h('markdown', {}, [h.text(md)])
+        return h('qq:rawmarkdown', { content: md })
       } catch (error) {
         return `获取群列表失败: ${(error as Error).message}`
       }
@@ -409,7 +409,7 @@ export function apply(ctx: Context, config: Config) {
       try {
         const sources = await getAllSources(ctx)
         const md = formatSourceList(sources)
-        return h('markdown', {}, [h.text(md)])
+        return h('qq:rawmarkdown', { content: md })
       } catch (error) {
         return `获取源列表失败: ${(error as Error).message}`
       }

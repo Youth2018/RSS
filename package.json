@@ -1,6 +1,6 @@
 {
   "name": "koishi-plugin-rss-subscribe",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "自用RSS订阅 - Koishi v4 RSS订阅推送插件，支持QQ官方机器人Markdown格式消息发送，定时抓取RSS源并推送新内容到指定群聊",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
