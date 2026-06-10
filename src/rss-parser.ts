@@ -1,17 +1,23 @@
 /**
  * RSS解析模块
  * 负责从RSS源抓取并解析内容
- * 专门适配Nitter RSS源格式
+ * 专门适配Nitter RSS源格式（基于rtcrss/bloxyrss实际数据分析）
  *
- * Nitter RSS格式特点（基于实际rss.txt分析）：
+ * Nitter RSS格式特点：
  * - 标题格式：
  *   - 原创: "内容文本"
  *   - 回复: "R to @用户名: 回复内容"
  *   - 转推: "RT by @转发者: 原作者内容"
- * - description: CDATA包裹的HTML，包含<p>文本、<a>链接、<img>图片
+ * - description: CDATA包裹的HTML，包含<p>文本、<a>链接、<img>图片、<blockquote>引用
  * - dc:creator: "@用户名"格式
  * - guid: 推文ID
  * - link: nitter.net/用户名/status/ID#m
+ *
+ * 内容结构解析：
+ * - 标题通常是正文的第一段（第一句话）
+ * - description包含完整HTML内容，包括图片和引用
+ * - <blockquote>包含引用的推文
+ * - <img>标签包含图片URL（nitter代理格式）
  */
 
 import RssParser from 'rss-parser'
@@ -100,10 +106,6 @@ export async function fetchRSSFeed(
 
 /**
  * 检测推文类型
- * Nitter RSS标题格式：
- * - 原创: 直接内容文本
- * - 回复: "R to @用户名: 内容"
- * - 转推: "RT by @用户名: 内容"
  */
 function detectTweetType(title: string, nitterMode: boolean): 'original' | 'reply' | 'retweet' {
   if (!nitterMode) return 'original'
@@ -114,20 +116,17 @@ function detectTweetType(title: string, nitterMode: boolean): 'original' | 'repl
 
 /**
  * 提取标题
- * 根据推文类型清理标题前缀
+ * 标题是正文的第一句话，直接使用清理后的标题文本
  */
 function extractTitle(item: RssParser.Item, nitterMode: boolean, tweetType: 'original' | 'reply' | 'retweet'): string {
   let title = item.title || '无标题'
 
   if (nitterMode) {
     if (tweetType === 'reply') {
-      // "R to @Roblox_RTC: 内容" → "内容"
       title = title.replace(/^R to @[^:]+:\s*/, '')
     } else if (tweetType === 'retweet') {
-      // "RT by @Roblox_RTC: 内容" → "内容"
       title = title.replace(/^RT by @[^:]+:\s*/, '')
     }
-    // 解码 &apos; 等HTML实体
     title = decodeEntities(title)
   }
 
@@ -136,7 +135,7 @@ function extractTitle(item: RssParser.Item, nitterMode: boolean, tweetType: 'ori
 
 /**
  * 从RSS条目中提取文本内容
- * 针对Nitter源做专门优化，保留链接信息
+ * 针对Nitter源做专门优化
  */
 function extractContent(item: RssParser.Item, nitterMode: boolean, tweetType: 'original' | 'reply' | 'retweet'): string {
   if (nitterMode) {
@@ -161,16 +160,15 @@ function extractContent(item: RssParser.Item, nitterMode: boolean, tweetType: 'o
 /**
  * 专门提取Nitter RSS源的内容
  * 从description的HTML中提取纯文本，保留roblox.com等关键链接
+ * 分离正文和引用内容
  */
 function extractNitterContent(item: RssParser.Item, tweetType: 'original' | 'reply' | 'retweet'): string {
-  // 使用content字段（HTML格式），从中提取文本和链接
   if (item.content) {
     let text = extractTextFromNitterHtml(item.content)
     text = decodeEntities(text)
     return text.trim()
   }
 
-  // 回退到contentSnippet
   if (item.contentSnippet) {
     let text = item.contentSnippet
     text = decodeEntities(text)
@@ -182,28 +180,45 @@ function extractNitterContent(item: RssParser.Item, tweetType: 'original' | 'rep
 
 /**
  * 从Nitter HTML内容中提取纯文本
- * 保留roblox.com等关键链接，移除nitter.net代理链接和图片标签
+ * 保留roblox.com等关键链接，移除nitter代理链接
+ * 处理<blockquote>引用推文
  */
 function extractTextFromNitterHtml(html: string): string {
-  // 先提取<a>标签中的链接信息
   let text = html
-    // 将<a href="roblox链接">显示文本</a> 转为 "显示文本(链接)"
-    .replace(/<a\s+href="(https?:\/\/(?:www\.)?(?:roblox\.com|devforum\.roblox\.com)\/[^"]*)"[^>]*>([^<]*)<\/a>/gi,
+    // 处理<blockquote>引用内容：提取引用作者和文本
+    .replace(/<blockquote>([\s\S]*?)<\/blockquote>/gi, (_, content) => {
+      const author = content.match(/<b>([^<]+)<\/b>/)?.[1] || ''
+      const quoteText = content
+        .replace(/<b>[^<]*<\/b>/g, '')
+        .replace(/<footer>[\s\S]*?<\/footer>/g, '')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/p>/gi, '\n')
+        .replace(/<[^>]*>/g, '')
+        .replace(/https?:\/\/nitter\.net\/\S+/g, '')
+        .replace(/\n{2,}/g, '\n')
+        .trim()
+      return quoteText ? `\n[引用 ${author}]\n${quoteText}` : ''
+    })
+    // 将<a>标签中的roblox/devforum链接转为纯URL
+    .replace(/<a\s+href="(https?:\/\/(?:www\.)?(?:roblox\.com|devforum\.roblox\.com|bloxy\.news|create\.roblox\.com)\/[^"]*)"[^>]*>([^<]*)<\/a>/gi,
       (_, url, linkText) => {
-        // 如果链接文本是截断的URL，直接用完整URL
         if (linkText.includes('…') || linkText.includes('...')) {
           return url
         }
-        return `${linkText}(${url})`
+        return url
       })
-    // 移除nitter.net链接（推文引用链接）
+    // 移除nitter.net链接
     .replace(/<a\s+href="https?:\/\/nitter\.net\/[^"]*"[^>]*>([^<]*)<\/a>/gi, '')
-    // 移除hashtag链接
+    // 移除hashtag链接，保留标签文本
     .replace(/<a\s+href="https?:\/\/nitter\.net\/search[^"]*"[^>]*>([^<]*)<\/a>/gi, '$1')
+    // 移除其他<a>标签（非roblox链接）
+    .replace(/<a\s+href="[^"]*"[^>]*>([^<]*)<\/a>/gi, '$1')
     // <br> 转换为换行
     .replace(/<br\s*\/?>/gi, '\n')
     // </p> 转换为换行
     .replace(/<\/p>/gi, '\n')
+    // <hr/> 转换为换行分隔
+    .replace(/<hr\s*\/?>/gi, '\n')
     // 移除所有剩余HTML标签（包括<img>）
     .replace(/<[^>]*>/g, '')
     // 移除pic.twitter.com链接
@@ -212,6 +227,11 @@ function extractTextFromNitterHtml(html: string): string {
     .replace(/https?:\/\/nitter\.net\/pic\/\S+/g, '')
     // 移除twitter/x.com推文链接
     .replace(/https?:\/\/(?:twitter|x)\.com\/\S+/g, '')
+    // 移除Video标记
+    .replace(/\nVideo\n/g, '\n')
+    .replace(/^Video$/gm, '')
+    // 移除GIF标记
+    .replace(/^GIF$/gm, '')
     // 合并多余换行
     .replace(/\n{3,}/g, '\n\n')
     // 合并多余空白（保留换行）
@@ -239,13 +259,7 @@ function extractImageUrls(item: RssParser.Item, nitterMode: boolean): string[] {
     let imgUrl = match[1]
 
     if (nitterMode) {
-      // Nitter图片代理URL格式: https://nitter.net/pic/media%2FHKL8p0xXEAALNpF.jpg
-      // 需要解码 %2F 来获取原始twitter图片URL
-      // 解码后: https://nitter.net/pic/media/HKL8p0xXEAALNpF.jpg
-      // 实际原始URL: https://pbs.twimg.com/media/HKL8p0xXEAALNpF.jpg
-
-      // 将nitter代理URL转换为twitter原始URL
-      // /pic/media%2Fxxx → https://pbs.twimg.com/xxx
+      // /pic/media%2Fxxx → https://pbs.twimg.com/media/xxx
       const mediaMatch = imgUrl.match(/nitter\.net\/pic\/media%2F(.+\.(?:jpg|png|webp|gif))/i)
         || imgUrl.match(/nitter\.net\/pic\/media\/(.+\.(?:jpg|png|webp|gif))/i)
       if (mediaMatch) {
@@ -272,6 +286,12 @@ function extractImageUrls(item: RssParser.Item, nitterMode: boolean): string[] {
       if (extVideoMatch) {
         imgUrl = `https://pbs.twimg.com/ext_tw_video_thumb/${decodeURIComponent(extVideoMatch[1])}`
       }
+
+      // /pic/https%3A%2F%2Fpbs.twimg.com%2F... → 直接解码
+      const directMatch = imgUrl.match(/nitter\.net\/pic\/(https?.+)/i)
+      if (directMatch && !mediaMatch && !cardMatch && !videoMatch && !extVideoMatch) {
+        imgUrl = decodeURIComponent(directMatch[1])
+      }
     }
 
     // 过滤掉非图片URL和过小的占位图
@@ -291,7 +311,6 @@ function normalizeLink(link: string | undefined, sourceUrl: string): string {
   if (!link) return '#'
 
   if (link.includes('nitter.net')) {
-    // 移除 #m 后缀
     link = link.replace(/#m$/, '')
     return link.replace(/nitter\.net\/([^/]+)\/status\/(\d+)/, 'x.com/$1/status/$2')
   }

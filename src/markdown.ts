@@ -14,10 +14,12 @@
  * - 换行使用 \n（QQ不支持\r换行）
  * - 不支持HTML标签
  *
- * 内容格式规范：
- * - 原文内容使用代码块(```text)封装，保证原文格式完整展示
- * - 代码块外的辅助信息（标题、来源、链接等）使用标准Markdown排版
- * - 代码块内不做Markdown转义，保持原文原样
+ * 消息格式规范：
+ * **新闻第一句话**
+ * > 作者时间等额外信息
+ * - 新闻主要内容
+ * ![img #图片高参数px #图片宽参数px](上传图床后的链接)
+ * - 新闻补充内容（如存在）
  */
 
 import { RSSItem } from './types'
@@ -29,20 +31,26 @@ const DEFAULT_PUSH_TITLE = 'Roblox RSS 最新推送'
 const QQ_IMAGE_WIDTH = 400
 const QQ_IMAGE_HEIGHT = 300
 
-/** 代码块内内容最大长度（QQ消息总长度限制） */
-const MAX_CONTENT_LENGTH = 500
-
 /**
  * 将RSS条目转换为QQ Markdown消息
+ * 格式规范：
+ * **标题（第一句话）**
+ * > 来源：xxx | 作者：xxx | 时间：xxx
+ * - 主要内容段落1
+ * - 主要内容段落2
+ * ![img #400px #300px](图片链接)
+ * - 补充内容
  */
 export function convertToMarkdown(item: RSSItem, pushTitle?: string): string {
   const lines: string[] = []
 
-  // 标题
-  lines.push(`## ${formatItemTitle(item)}`)
+  // 标题（粗体显示，消除与正文的重复）
+  const typeIcon = getTypeIcon(item.tweetType)
+  const titleText = escapeMarkdownText(item.title)
+  lines.push(`**${typeIcon}${titleText}**`)
   lines.push('')
 
-  // 来源信息
+  // 来源信息（引用块）
   const metaParts = [`来源：${item.sourceName}`]
   if (item.author) {
     metaParts.push(`作者：${item.author}`)
@@ -51,27 +59,24 @@ export function convertToMarkdown(item: RSSItem, pushTitle?: string): string {
   lines.push(`> ${metaParts.join(' | ')}`)
   lines.push('')
 
-  // 原文内容使用代码块封装
-  if (item.content) {
-    const cleaned = cleanContent(item.content)
-    const truncated = cleaned.length > MAX_CONTENT_LENGTH
-      ? cleaned.substring(0, MAX_CONTENT_LENGTH) + '...'
-      : cleaned
-    lines.push('```text')
-    lines.push(truncated)
-    lines.push('```')
-    lines.push('')
+  // 正文内容（去掉与标题重复的第一段）
+  const contentBody = removeTitleDuplicate(item.title, item.content)
+  if (contentBody) {
+    const contentLines = formatContentBody(contentBody)
+    for (const line of contentLines) {
+      lines.push(line)
+    }
   }
 
   // 图片（使用图床CDN链接）
-  // QQ Markdown图片格式：![alt文本 #宽px #高px](url)
   if (item.imageUrls && item.imageUrls.length > 0) {
     for (const imgUrl of item.imageUrls) {
       if (imgUrl.startsWith('http')) {
-        lines.push(`![img #${QQ_IMAGE_WIDTH}px #${QQ_IMAGE_HEIGHT}px](${imgUrl})`)
         lines.push('')
+        lines.push(`![img #${QQ_IMAGE_WIDTH}px #${QQ_IMAGE_HEIGHT}px](${imgUrl})`)
       }
     }
+    lines.push('')
   }
 
   // 原文链接
@@ -84,8 +89,6 @@ export function convertToMarkdown(item: RSSItem, pushTitle?: string): string {
 
 /**
  * 将多个RSS条目转换为一条汇总Markdown消息
- * @param items RSS条目列表
- * @param pushTitle 自定义推送标题，默认"Roblox RSS 最新推送"
  */
 export function convertBatchToMarkdown(items: RSSItem[], pushTitle?: string): string {
   if (items.length === 0) return ''
@@ -105,8 +108,10 @@ export function convertBatchToMarkdown(items: RSSItem[], pushTitle?: string): st
       lines.push('')
     }
 
-    // 条目标题（含类型标记）
-    lines.push(`## ${formatItemTitle(item)}`)
+    // 条目标题（粗体显示）
+    const typeIcon = getTypeIcon(item.tweetType)
+    const titleText = escapeMarkdownText(item.title)
+    lines.push(`**${typeIcon}${titleText}**`)
     lines.push('')
 
     // 来源信息（引用块）
@@ -118,27 +123,24 @@ export function convertBatchToMarkdown(items: RSSItem[], pushTitle?: string): st
     lines.push(`> ${metaParts.join(' | ')}`)
     lines.push('')
 
-    // 原文内容使用代码块封装
-    if (item.content) {
-      const cleaned = cleanContent(item.content)
-      const truncated = cleaned.length > MAX_CONTENT_LENGTH
-        ? cleaned.substring(0, MAX_CONTENT_LENGTH) + '...'
-        : cleaned
-      lines.push('```text')
-      lines.push(truncated)
-      lines.push('```')
-      lines.push('')
+    // 正文内容（去掉与标题重复的第一段）
+    const contentBody = removeTitleDuplicate(item.title, item.content)
+    if (contentBody) {
+      const contentLines = formatContentBody(contentBody)
+      for (const line of contentLines) {
+        lines.push(line)
+      }
     }
 
-    // 图片（使用图床CDN链接）
-    // QQ Markdown图片格式：![alt文本 #宽px #高px](url)
+    // 图片
     if (item.imageUrls && item.imageUrls.length > 0) {
       for (const imgUrl of item.imageUrls) {
         if (imgUrl.startsWith('http')) {
-          lines.push(`![img #${QQ_IMAGE_WIDTH}px #${QQ_IMAGE_HEIGHT}px](${imgUrl})`)
           lines.push('')
+          lines.push(`![img #${QQ_IMAGE_WIDTH}px #${QQ_IMAGE_HEIGHT}px](${imgUrl})`)
         }
       }
+      lines.push('')
     }
 
     // 原文链接
@@ -152,16 +154,137 @@ export function convertBatchToMarkdown(items: RSSItem[], pushTitle?: string): st
 }
 
 /**
- * 格式化条目标题，包含推文类型标记
+ * 获取推文类型图标
  */
-function formatItemTitle(item: RSSItem): string {
-  const typeIcons: Record<string, string> = {
-    reply: '💬',
-    retweet: '🔁',
+function getTypeIcon(tweetType: string): string {
+  const icons: Record<string, string> = {
+    reply: '💬 ',
+    retweet: '🔁 ',
     original: '',
   }
-  const icon = typeIcons[item.tweetType] || ''
-  return icon ? `${icon} ${item.title}` : item.title
+  return icons[tweetType] || ''
+}
+
+/**
+ * 移除内容中与标题重复的第一段
+ * Nitter RSS的标题通常是正文的第一段，需要去重
+ *
+ * 去重策略：按行比对，移除内容开头与标题匹配的行
+ */
+function removeTitleDuplicate(title: string, content: string): string {
+  if (!content) return ''
+  if (!title) return content.trim()
+
+  const titleLines = title.split(/\n+/).map(l => l.replace(/\s+/g, ' ').trim().toLowerCase()).filter(l => l)
+  const contentLines = content.split(/\n+/)
+
+  // 逐行比对，跳过内容开头与标题匹配的行
+  let skipCount = 0
+  for (let i = 0; i < titleLines.length && i < contentLines.length; i++) {
+    const contentLine = contentLines[i].replace(/\s+/g, ' ').trim().toLowerCase()
+    if (contentLine === titleLines[i]) {
+      skipCount = i + 1
+    } else {
+      break
+    }
+  }
+
+  if (skipCount > 0) {
+    const remaining = contentLines.slice(skipCount).join('\n').trim()
+    return remaining
+  }
+
+  return content.trim()
+}
+
+/**
+ * 格式化正文内容为Markdown列表项
+ * 将每个段落转换为 - 列表项格式
+ */
+function formatContentBody(content: string): string[] {
+  const lines: string[] = []
+
+  // 按换行分段
+  const paragraphs = content.split(/\n+/).filter(p => p.trim())
+
+  for (const para of paragraphs) {
+    const trimmed = para.trim()
+    if (!trimmed) continue
+
+    // 处理引用内容
+    if (trimmed.startsWith('[引用')) {
+      lines.push(`> ${escapeMarkdownText(trimmed)}`)
+      lines.push('')
+      continue
+    }
+
+    // 处理URL链接行
+    if (trimmed.match(/^https?:\/\/\S+$/)) {
+      lines.push(`- ${trimmed}`)
+      continue
+    }
+
+    // 普通内容段落，使用列表项格式
+    lines.push(`- ${escapeMarkdownText(trimmed)}`)
+  }
+
+  return lines
+}
+
+/**
+ * 转义Markdown文本中的特殊字符
+ * 确保 &, <, >, #, *, _, ~, `, [, ], (, ) 等字符不会破坏Markdown格式
+ * 但保留URL中的特殊字符
+ */
+function escapeMarkdownText(text: string): string {
+  if (!text) return ''
+
+  // 保护URL：先提取所有URL，用不含特殊字符的占位符替换
+  const urls: string[] = []
+  let protected_text = text.replace(/https?:\/\/\S+/g, (url) => {
+    urls.push(url)
+    return `URLESCAPE${urls.length - 1}ENDURL`
+  })
+
+  // 转义Markdown特殊字符
+  protected_text = protected_text
+    // 转义反斜杠（先处理，避免双重转义）
+    .replace(/\\/g, '\\\\')
+    // 转义反引号
+    .replace(/`/g, '\\`')
+    // 转义星号
+    .replace(/\*/g, '\\*')
+    // 转义下划线
+    .replace(/_/g, '\\_')
+    // 转义波浪号
+    .replace(/~/g, '\\~')
+    // 转义方括号
+    .replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]')
+    // 转义圆括号
+    .replace(/\(/g, '\\(')
+    .replace(/\)/g, '\\)')
+    // 转义井号
+    .replace(/#/g, '\\#')
+    // 转义大于号（避免被解析为引用块）
+    .replace(/>/g, '\\>')
+    // 转义小于号
+    .replace(/</g, '\\<')
+    // 转义竖线
+    .replace(/\|/g, '\\|')
+    // 转义加号（避免被解析为列表）
+    .replace(/^\+/gm, '\\+')
+    // 转义减号（避免被解析为列表）—— 仅行首
+    .replace(/^-/gm, '\\-')
+    // 转义感叹号（避免被解析为图片）
+    .replace(/^!/gm, '\\!')
+
+  // 恢复URL
+  protected_text = protected_text.replace(/URLESCAPE(\d+)ENDURL/g, (_, idx) => {
+    return urls[parseInt(idx)]
+  })
+
+  return protected_text
 }
 
 /**
@@ -233,44 +356,6 @@ export function formatStatus(status: {
   }
 
   return lines.join('\n')
-}
-
-/**
- * 清理内容文本（用于代码块内展示）
- * 代码块内不需要Markdown转义，保持原文格式
- */
-function cleanContent(content: string): string {
-  return content
-    // 移除HTML标签
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/p>/gi, '\n')
-    .replace(/<[^>]*>/g, '')
-    // 解码HTML实体
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&#8217;/g, "'")
-    .replace(/&#8216;/g, "'")
-    .replace(/&#8220;/g, '"')
-    .replace(/&#8221;/g, '"')
-    .replace(/&#8211;/g, '-')
-    .replace(/&#8212;/g, '--')
-    .replace(/&#8230;/g, '...')
-    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code)))
-    .replace(/&[a-zA-Z]+;/g, '')
-    // 转义代码块内的反引号，防止破坏代码块格式
-    .replace(/```/g, '\\`\\`\\`')
-    // 合并多余空白（保留换行）
-    .replace(/[^\S\n]+/g, ' ')
-    // 合并多余换行
-    .replace(/\n{3,}/g, '\n\n')
-    // 移除控制字符
-    .replace(/[\x00-\x1f\x7f]/g, '')
-    .trim()
 }
 
 /**
