@@ -23,6 +23,7 @@
  */
 
 import { RSSItem } from './types'
+import { getSourceProfile, SourceCategory } from './source-profiles'
 
 /** 默认推送标题 */
 const DEFAULT_PUSH_TITLE = 'Roblox RSS 最新推送'
@@ -43,6 +44,7 @@ const QQ_IMAGE_HEIGHT = 300
  */
 export function convertToMarkdown(item: RSSItem, pushTitle?: string): string {
   const lines: string[] = []
+  const profile = getSourceProfile({ link: item.link, sourceName: item.sourceName })
 
   // 标题（粗体显示，消除与正文的重复）
   const typeIcon = getTypeIcon(item.tweetType)
@@ -50,19 +52,20 @@ export function convertToMarkdown(item: RSSItem, pushTitle?: string): string {
   lines.push(`**${typeIcon}${titleText}**`)
   lines.push('')
 
-  // 来源信息（引用块）
-  const metaParts = [`来源：${item.sourceName}`]
+  // 来源信息（引用块）：使用源画像的emoji与友好名称
+  const sourceLabel = profile.label || item.sourceName
+  const metaParts = [`${profile.emoji} ${sourceLabel}`]
   if (item.author) {
-    metaParts.push(`作者：${item.author}`)
+    metaParts.push(`@${item.author}`)
   }
-  metaParts.push(`时间：${formatDate(item.pubDate)}`)
-  lines.push(`> ${metaParts.join(' | ')}`)
+  metaParts.push(formatDate(item.pubDate))
+  lines.push(`> ${metaParts.join(' · ')}`)
   lines.push('')
 
   // 正文内容（去掉与标题重复的第一段）
   const contentBody = removeTitleDuplicate(item.title, item.content)
   if (contentBody) {
-    const contentLines = formatContentBody(contentBody)
+    const contentLines = formatContentBody(contentBody, profile.category)
     for (const line of contentLines) {
       lines.push(line)
     }
@@ -81,7 +84,7 @@ export function convertToMarkdown(item: RSSItem, pushTitle?: string): string {
 
   // 原文链接
   if (item.link && item.link !== '#') {
-    lines.push(`[查看原文](${item.link})`)
+    lines.push(`[查看原文 ›](${item.link})`)
   }
 
   return lines.join('\n')
@@ -96,11 +99,19 @@ export function convertBatchToMarkdown(items: RSSItem[], pushTitle?: string): st
   const title = pushTitle || DEFAULT_PUSH_TITLE
   const lines: string[] = []
 
-  lines.push(`# ${title}`)
+  // 批次来源画像（调度器按源分批推送，故同一批次通常同源）
+  const batchProfile = getSourceProfile({ link: items[0].link, sourceName: items[0].sourceName })
+  const banner = batchProfile.label
+    ? `# ${batchProfile.emoji} ${title} · ${batchProfile.label}`
+    : `# ${title}`
+  lines.push(banner)
+  const sourceLabel = batchProfile.label || items[0].sourceName
+  lines.push(`> ${batchProfile.emoji} 来源：${sourceLabel}${batchProfile.description ? `（${batchProfile.description}）` : ''} · 共 ${items.length} 条`)
   lines.push('')
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i]
+    const profile = getSourceProfile({ link: item.link, sourceName: item.sourceName })
 
     // 分割线
     if (i > 0) {
@@ -114,19 +125,20 @@ export function convertBatchToMarkdown(items: RSSItem[], pushTitle?: string): st
     lines.push(`**${typeIcon}${titleText}**`)
     lines.push('')
 
-    // 来源信息（引用块）
-    const metaParts = [`来源：${item.sourceName}`]
+    // 来源信息（引用块）：emoji · 友好名 · @作者 · 时间
+    const itemSourceLabel = profile.label || item.sourceName
+    const metaParts = [`${profile.emoji} ${itemSourceLabel}`]
     if (item.author) {
-      metaParts.push(`作者：${item.author}`)
+      metaParts.push(`@${item.author}`)
     }
-    metaParts.push(`时间：${formatDate(item.pubDate)}`)
-    lines.push(`> ${metaParts.join(' | ')}`)
+    metaParts.push(formatDate(item.pubDate))
+    lines.push(`> ${metaParts.join(' · ')}`)
     lines.push('')
 
     // 正文内容（去掉与标题重复的第一段）
     const contentBody = removeTitleDuplicate(item.title, item.content)
     if (contentBody) {
-      const contentLines = formatContentBody(contentBody)
+      const contentLines = formatContentBody(contentBody, profile.category)
       for (const line of contentLines) {
         lines.push(line)
       }
@@ -145,7 +157,7 @@ export function convertBatchToMarkdown(items: RSSItem[], pushTitle?: string): st
 
     // 原文链接
     if (item.link && item.link !== '#') {
-      lines.push(`[查看原文](${item.link})`)
+      lines.push(`[查看原文 ›](${item.link})`)
       lines.push('')
     }
   }
@@ -200,8 +212,9 @@ function removeTitleDuplicate(title: string, content: string): string {
 /**
  * 格式化正文内容为Markdown列表项
  * 将每个段落转换为 - 列表项格式
+ * @param category 源类别，用于针对性排版（如 trading 行情高亮数值）
  */
-function formatContentBody(content: string): string[] {
+function formatContentBody(content: string, category: SourceCategory = 'generic'): string[] {
   const lines: string[] = []
 
   // 按换行分段
@@ -224,11 +237,28 @@ function formatContentBody(content: string): string[] {
       continue
     }
 
+    // 交易行情类（Rolimons）：高亮 Value / RAP / Demand 等数值字段
+    if (category === 'trading') {
+      lines.push(`- ${formatTradingLine(trimmed)}`)
+      continue
+    }
+
     // 普通内容段落，使用列表项格式
     lines.push(`- ${escapeMarkdownText(trimmed)}`)
   }
 
   return lines
+}
+
+/**
+ * 交易行情行格式化：将 "字段: 数值" 中的字段名加粗，便于在QQ中快速识别价格信息
+ * 例：Value: 1,234 → **Value:** 1,234
+ */
+function formatTradingLine(text: string): string {
+  const escaped = escapeMarkdownText(text)
+  // 高亮常见行情字段名（已转义文本中字段名为英文/数字，不含特殊字符）
+  return escaped.replace(/\b(Value|RAP|Demand|Trend|Projected|Rare|Price|Volume|Best Price)\b\s*[:：]/gi,
+    (_m, field) => `**${field}：**`)
 }
 
 /**
@@ -322,6 +352,85 @@ export function formatGroupList(groups: { groupId: string; enabled: boolean; cre
     const status = g.enabled ? '✅' : '❌'
     const time = new Date(g.createdAt).toLocaleString()
     lines.push(`${i + 1}. ${status} 群ID：${g.groupId} | 添加时间：${time}`)
+  }
+
+  return lines.join('\n')
+}
+
+/**
+ * 将测试推送结果转换为Markdown格式（用于指令回复/控制台反馈）
+ */
+export function formatTestPushResult(result: {
+  totalSources: number
+  okSources: number
+  failedSources: number
+  emptySources: number
+  pushedMessages: number
+  groups: string[]
+  details: { source: string; status: 'ok' | 'empty' | 'error' | 'push-failed'; items: number; error?: string }[]
+}): string {
+  const statusIcon: Record<string, string> = {
+    ok: '✅',
+    empty: '⚪',
+    error: '❌',
+    'push-failed': '⚠️',
+  }
+  const statusText: Record<string, string> = {
+    ok: '已推送',
+    empty: '无内容',
+    error: '抓取失败',
+    'push-failed': '推送失败',
+  }
+
+  const lines: string[] = []
+  lines.push('# 测试推送结果')
+  lines.push('')
+  lines.push(`> 目标群 ${result.groups.length} 个 | 成功 ${result.okSources} | 失败 ${result.failedSources} | 无内容 ${result.emptySources} | 共发送 ${result.pushedMessages} 条`)
+  lines.push('')
+
+  for (const d of result.details) {
+    const icon = statusIcon[d.status] || '•'
+    const text = statusText[d.status] || d.status
+    let line = `- ${icon} **${d.source}** — ${text}`
+    if (d.status === 'ok') line += `（${d.items} 条）`
+    if (d.error) line += `：${d.error}`
+    lines.push(line)
+  }
+
+  return lines.join('\n')
+}
+
+/**
+ * 将关键词过滤与免打扰设置转换为Markdown格式（用于命令回复）
+ */
+export function formatFilterSettings(filter: {
+  filterMode: 'off' | 'include' | 'exclude'
+  filterKeywords: string[]
+  quietStart: number
+  quietEnd: number
+}): string {
+  const modeLabel: Record<string, string> = {
+    off: '关闭（推送全部）',
+    include: '白名单（仅推送命中关键词）',
+    exclude: '黑名单（过滤命中关键词）',
+  }
+
+  const lines: string[] = []
+  lines.push('# 内容过滤设置')
+  lines.push('')
+  lines.push(`- **过滤模式：** ${modeLabel[filter.filterMode] || filter.filterMode}`)
+
+  if (filter.filterKeywords.length > 0) {
+    lines.push(`- **关键词（${filter.filterKeywords.length}）：** ${filter.filterKeywords.join('、')}`)
+  } else {
+    lines.push('- **关键词：** （空）')
+  }
+
+  if (filter.quietStart >= 0 && filter.quietEnd >= 0 && filter.quietStart !== filter.quietEnd) {
+    const pad = (n: number) => String(n).padStart(2, '0')
+    lines.push(`- **免打扰时段：** ${pad(filter.quietStart)}:00 - ${pad(filter.quietEnd)}:00`)
+  } else {
+    lines.push('- **免打扰时段：** 未启用')
   }
 
   return lines.join('\n')

@@ -5,3 +5,4 @@ lib/
 .env
 *.log
 package-lock.json
+*.tgz

@@ -38,6 +38,9 @@ export interface SentRecord {
   sentAt: number
 }
 
+/** 关键词过滤模式 */
+export type FilterMode = 'off' | 'include' | 'exclude'
+
 /** 插件设置 */
 export interface PluginSettings {
   /** 唯一标识 */
@@ -52,6 +55,14 @@ export interface PluginSettings {
   maxItemsPerPush: number
   /** 是否启用插件 */
   enabled: boolean
+  /** 关键词过滤模式：off=不过滤, include=白名单, exclude=黑名单 */
+  filterMode: FilterMode
+  /** 过滤关键词列表 */
+  filterKeywords: string[]
+  /** 免打扰开始时段（0-23小时，-1表示禁用） */
+  quietStart: number
+  /** 免打扰结束时段（0-23小时，-1表示禁用） */
+  quietEnd: number
 }
 
 /** RSS解析后的条目 */
@@ -105,6 +116,10 @@ export const DEFAULT_SETTINGS: Omit<PluginSettings, 'id'> = {
   maxRetries: 3,
   maxItemsPerPush: 5,
   enabled: true,
+  filterMode: 'off',
+  filterKeywords: [],
+  quietStart: -1,
+  quietEnd: -1,
 }
 
 /** 默认RSS源列表 */

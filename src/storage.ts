@@ -68,10 +68,34 @@ export function registerModels(ctx: Context): void {
     maxRetries: 'unsigned',
     maxItemsPerPush: 'unsigned',
     enabled: 'boolean',
+    // 关键词过滤与免打扰（v1.3.0 新增，带初始值以兼容旧数据库的列迁移）
+    filterMode: { type: 'string', initial: 'off' },
+    filterKeywords: { type: 'json', initial: [] },
+    quietStart: { type: 'integer', initial: -1 },
+    quietEnd: { type: 'integer', initial: -1 },
   }, {
     primary: 'id',
     autoInc: true,
   })
+}
+
+/**
+ * 规范化设置对象，为旧数据库中可能缺失的字段填充默认值
+ */
+function normalizeSettings(settings: PluginSettings): PluginSettings {
+  if (settings.filterMode !== 'include' && settings.filterMode !== 'exclude') {
+    settings.filterMode = 'off'
+  }
+  if (!Array.isArray(settings.filterKeywords)) {
+    settings.filterKeywords = []
+  }
+  if (typeof settings.quietStart !== 'number' || Number.isNaN(settings.quietStart)) {
+    settings.quietStart = -1
+  }
+  if (typeof settings.quietEnd !== 'number' || Number.isNaN(settings.quietEnd)) {
+    settings.quietEnd = -1
+  }
+  return settings
 }
 
 /**
@@ -81,9 +105,9 @@ export async function getSettings(ctx: Context): Promise<PluginSettings> {
   const settings = await ctx.database.get('rss_settings', {}, { limit: 1 })
   if (settings.length === 0) {
     const created = await ctx.database.create('rss_settings', { ...DEFAULT_SETTINGS })
-    return created as unknown as PluginSettings
+    return normalizeSettings(created as unknown as PluginSettings)
   }
-  return settings[0]
+  return normalizeSettings(settings[0])
 }
 
 /**
@@ -95,6 +119,44 @@ export async function updateSettings(
 ): Promise<void> {
   const settings = await getSettings(ctx)
   await ctx.database.set('rss_settings', { id: settings.id }, updates)
+}
+
+/**
+ * 添加过滤关键词（自动去重，忽略大小写）
+ * @returns 添加后的完整关键词列表
+ */
+export async function addFilterKeywords(ctx: Context, keywords: string[]): Promise<string[]> {
+  const settings = await getSettings(ctx)
+  const existing = settings.filterKeywords
+  const lowerSet = new Set(existing.map((k) => k.toLowerCase()))
+  for (const raw of keywords) {
+    const kw = raw.trim()
+    if (!kw) continue
+    if (lowerSet.has(kw.toLowerCase())) continue
+    lowerSet.add(kw.toLowerCase())
+    existing.push(kw)
+  }
+  await updateSettings(ctx, { filterKeywords: existing })
+  return existing
+}
+
+/**
+ * 移除过滤关键词（忽略大小写）
+ * @returns 移除后的完整关键词列表
+ */
+export async function removeFilterKeywords(ctx: Context, keywords: string[]): Promise<string[]> {
+  const settings = await getSettings(ctx)
+  const removeSet = new Set(keywords.map((k) => k.trim().toLowerCase()).filter((k) => k))
+  const remaining = settings.filterKeywords.filter((k) => !removeSet.has(k.toLowerCase()))
+  await updateSettings(ctx, { filterKeywords: remaining })
+  return remaining
+}
+
+/**
+ * 清空所有过滤关键词
+ */
+export async function clearFilterKeywords(ctx: Context): Promise<void> {
+  await updateSettings(ctx, { filterKeywords: [] })
 }
 
 /**
@@ -132,29 +194,59 @@ export async function initSources(ctx: Context): Promise<void> {
 }
 
 /**
+ * 根据名称生成安全且唯一的源ID
+ * - 仅保留小写字母、数字、下划线
+ * - 名称无有效字符（如纯中文/空）时回退为 'source'
+ * - 与 existingIds 冲突时追加数字后缀保证唯一
+ */
+export function generateSourceId(name: string, existingIds: Set<string>): string {
+  let base = (name || '')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9_]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+  if (!base) base = 'source'
+
+  let id = base
+  let counter = 1
+  while (existingIds.has(id)) {
+    id = `${base}_${counter}`
+    counter++
+  }
+  return id
+}
+
+/**
  * 添加RSS源
- * 添加前检查URL唯一性，避免UNIQUE constraint冲突
+ * - 校验URL有效性与唯一性，重复时抛出友好错误
+ * - 自动生成安全且唯一的源ID（兼容中文/空名称），避免主键冲突
  */
 export async function addSource(
   ctx: Context,
   source: Omit<RSSSource, 'id'>,
 ): Promise<RSSSource> {
+  const url = (source.url || '').trim()
+  if (!url) {
+    throw new Error('RSS源URL不能为空')
+  }
+
+  const name = (source.name || '').trim() || url
+
   // 检查URL是否已存在
-  const existingByUrl = await ctx.database.get('rss_source', { url: source.url })
-  if (existingByUrl.length > 0) {
-    throw new Error(`RSS源URL已存在: ${source.url}（源名称: ${existingByUrl[0].name}）`)
+  const existing = await getAllSources(ctx)
+  const duplicate = existing.find((s) => s.url === url)
+  if (duplicate) {
+    throw new Error(`RSS源URL已存在: ${url}（源名称: ${duplicate.name}）`)
   }
 
-  const id = source.name.toLowerCase().replace(/[^a-z0-9_]/g, '_')
+  const id = generateSourceId(name, new Set(existing.map((s) => s.id)))
 
-  // 检查ID是否已存在，若存在则追加后缀
-  let finalId = id
-  const existingById = await ctx.database.get('rss_source', { id: finalId })
-  if (existingById.length > 0) {
-    finalId = `${id}_${Date.now()}`
-  }
-
-  return ctx.database.create('rss_source', { id: finalId, ...source }) as unknown as RSSSource
+  return ctx.database.create('rss_source', {
+    id,
+    name,
+    url,
+    enabled: source.enabled ?? true,
+  }) as unknown as RSSSource
 }
 
 /**

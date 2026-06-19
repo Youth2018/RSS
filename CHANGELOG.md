@@ -2,6 +2,86 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2026-06-19
+
+### New Features
+
+- **Test push (测试推送)**: A new toggle on the plugin config page that, when enabled and saved, immediately fetches the latest 3 items from **all** added RSS sources and pushes them to the configured test group(s) so you can verify rendering end-to-end.
+  - Clear visual indicator (🚀) and loading/result feedback via the console **notifier** service (falls back to logs when notifier is unavailable)
+  - New `testGroupIds` config — dedicated test target group(s); falls back to `groupIds` when empty
+  - Test pushes do **not** write "sent" records, so they never interfere with the normal de-duplication of scheduled pushes
+  - New command `rss test` (`rss 测试推送`) for triggering the same flow on demand with an inline result summary
+
+- **Per-source Nitter Markdown adaptation (源画像)**: Dedicated presentation profiles for the five tracked accounts — `Roblox_RTC`, `Bloxy_News`, `Roblox`, `MrNotifier`, `Rolimons` — giving each a recognizable emoji + friendly label in the QQ Markdown banner and metadata line. Trading-style content (Rolimons) now bolds value fields (`Value:`, `RAP:`, `Demand:`, …) for readability. Unknown sources fall back to a clean generic layout.
+
+### Bug Fixes
+
+- **"UNIQUE constraint failed: rss_source.url" / source loading errors**: Hardened source creation so adding a source (via config page or command) can never crash plugin loading:
+  - New `generateSourceId()` produces safe, unique IDs even for empty or non-ASCII (e.g. Chinese) source names, with numeric suffixes on collision
+  - `syncSourcesFromConfig()` now skips invalid console entries (empty key/URL), de-duplicates URLs, and wraps each create in try/catch with friendly warnings
+  - `addSource()` validates URL presence + uniqueness and throws clear, actionable errors
+
+### Tests
+
+- Added a unit-test suite (`node --test`, run via `npm test`) covering ID generation, keyword/quiet-hours filtering, source profiles, and per-source Markdown rendering (29 tests)
+
+### API Changes
+
+- **New module `source-profiles.ts`**: `getSourceProfile()`, `extractHandleFromUrl()`, `isKnownProfile()`
+- **New scheduler export**: `performTestPush()` returning a structured `TestPushResult`
+- **New markdown helper**: `formatTestPushResult()`
+- **New storage export**: `generateSourceId()`
+- Plugin now declares `notifier` as an **optional** service
+
+### Compatibility
+
+- Fully backward compatible. No database schema changes. The `testPush` toggle is a transient action switch — turn it off after verifying.
+
+## [1.3.0] - 2026-06-19
+
+### New Features
+
+- **Keyword filtering (关键词过滤)**: Push only the content you care about. A new global filter supports three modes:
+  - `off` — push everything (default, unchanged behavior)
+  - `include` (whitelist) — only push items whose title/content/author matches any configured keyword
+  - `exclude` (blacklist) — drop items matching any configured keyword
+  - Matching is case-insensitive and runs against title + content + author
+  - Filtered-out items are marked as sent so they are not re-evaluated on every cycle
+
+- **Quiet hours (免打扰时段)**: Suspend pushing during a configurable hour range (e.g. `23:00 – 07:00`). The range is left-closed/right-open and supports across-midnight windows. Items discovered during quiet hours remain unsent and are pushed once the window ends, so nothing is lost.
+
+- **New configuration items** (plugin config page):
+  - `filterMode` — keyword filter mode selector (off / include / exclude)
+  - `filterKeywords` — keyword list (leave empty to manage purely via commands)
+  - `quietStart` / `quietEnd` — quiet-hours window (0–23, `-1` disables)
+
+- **New commands**:
+  - `rss filter` (`rss 过滤`) — show current filter mode, keywords, and quiet hours
+  - `rss filter mode <off|include|exclude>` (`rss 过滤模式`) — switch filter mode
+  - `rss filter add <keywords>` (`rss 添加关键词`) — add keywords (comma/space separated)
+  - `rss filter remove <keywords>` (`rss 移除关键词`) — remove keywords
+  - `rss filter clear` (`rss 清空关键词`) — clear all keywords
+  - `rss quiet <start> [end]` (`rss 免打扰`) — set quiet hours; `rss quiet off` disables
+
+### API Changes
+
+- **`PluginSettings`** extended with `filterMode`, `filterKeywords`, `quietStart`, `quietEnd` fields (with sensible defaults)
+- **New module `filter.ts`** exporting `passesKeywordFilter()`, `matchesKeywords()`, `normalizeKeywords()`, and `isInQuietHours()`
+- **New storage helpers**: `addFilterKeywords()`, `removeFilterKeywords()`, `clearFilterKeywords()`
+- **New markdown helper**: `formatFilterSettings()`
+
+### Compatibility
+
+- **Database**: The `rss_settings` table gains four new columns. They are declared with initial values, so existing databases auto-migrate without data loss. `getSettings()` also normalizes any missing/legacy fields at read time
+- **Config precedence**: `filterMode` and quiet-hours are config-authoritative on startup (consistent with `checkInterval`). `filterKeywords` is only overwritten from config when the config list is non-empty, allowing command-based keyword management when left empty
+- **Koishi Framework**: Requires Koishi v4.0.0+ (unchanged)
+- **Official QQ Adapter**: Fully compatible with `@koishijs/plugin-adapter-qq` (unchanged)
+
+### Known Issues
+
+- Keyword filtering is global (applies to all sources). Per-source filtering is not yet supported
+- Quiet hours use the host machine's local timezone
+
 ## [1.2.0] - 2026-06-10
 
 ### Breaking Changes

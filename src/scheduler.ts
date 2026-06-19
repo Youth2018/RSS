@@ -10,6 +10,7 @@ import { uploadImages, UploadProgress } from './image-uploader'
 import {
   getSettings,
   getEnabledSources,
+  getAllSources,
   getEnabledGroups,
   isItemSent,
   recordSentItem,
@@ -17,6 +18,7 @@ import {
   getSentCount,
 } from './storage'
 import { convertBatchToMarkdown } from './markdown'
+import { passesKeywordFilter, isInQuietHours } from './filter'
 import { PluginStatus, RSSSource, RSSItem } from './types'
 
 /** 定时器引用 */
@@ -112,6 +114,151 @@ export async function triggerManualCheck(ctx: Context): Promise<void> {
   await performCheck(ctx)
 }
 
+/** 单个源的测试推送结果 */
+export interface TestPushSourceDetail {
+  /** 源名称 */
+  source: string
+  /** 状态：ok=成功, empty=无内容, error=抓取失败, push-failed=推送失败 */
+  status: 'ok' | 'empty' | 'error' | 'push-failed'
+  /** 实际推送条数 */
+  items: number
+  /** 错误信息（status=error/push-failed 时） */
+  error?: string
+}
+
+/** 测试推送汇总结果 */
+export interface TestPushResult {
+  /** 源总数 */
+  totalSources: number
+  /** 成功推送的源数 */
+  okSources: number
+  /** 失败的源数 */
+  failedSources: number
+  /** 无新内容的源数 */
+  emptySources: number
+  /** 实际发出的消息总数 */
+  pushedMessages: number
+  /** 目标群列表 */
+  groups: string[]
+  /** 每个源的明细 */
+  details: TestPushSourceDetail[]
+}
+
+/**
+ * 测试推送：抓取所有已添加RSS源的最近若干条内容并推送到指定群组
+ * 用于在配置页面/指令中验证推送效果。
+ *
+ * 注意：测试推送不会写入"已发送"记录，因此不影响正常的定时去重逻辑。
+ *
+ * @param options.groupIds 指定测试群组（为空则使用已启用的群组）
+ * @param options.perSource 每个源抓取的最近条数（默认3）
+ */
+export async function performTestPush(
+  ctx: Context,
+  options: { groupIds?: string[]; perSource?: number } = {},
+): Promise<TestPushResult> {
+  const logger = ctx.logger('rss-subscribe')
+  const settings = await getSettings(ctx)
+  const perSource = options.perSource ?? 3
+
+  const sources = await getAllSources(ctx)
+  const candidateGroups =
+    options.groupIds && options.groupIds.length > 0
+      ? options.groupIds
+      : (await getEnabledGroups(ctx)).map((g) => g.groupId)
+  const groups = Array.from(new Set(candidateGroups.map((g) => g.trim()).filter(Boolean)))
+
+  if (sources.length === 0) {
+    throw new Error('没有可用的RSS源，请先添加RSS源')
+  }
+  if (groups.length === 0) {
+    throw new Error('没有指定测试群组，请在配置中设置 测试群组ID 或 推送目标群ID')
+  }
+
+  logger.info(`开始测试推送：${sources.length} 个源 → ${groups.length} 个群（每源最多 ${perSource} 条）`)
+
+  const result: TestPushResult = {
+    totalSources: sources.length,
+    okSources: 0,
+    failedSources: 0,
+    emptySources: 0,
+    pushedMessages: 0,
+    groups,
+    details: [],
+  }
+
+  for (const source of sources) {
+    try {
+      const items = await fetchRSSFeed(source.url, source.id, source.name, settings)
+      if (items.length === 0) {
+        result.emptySources++
+        result.details.push({ source: source.name, status: 'empty', items: 0 })
+        continue
+      }
+
+      const toPush = items.slice(0, perSource)
+
+      // 图片上传到图床（与正式推送一致）
+      if (imageUploadEnabled) {
+        for (const item of toPush) {
+          if (item.imageUrls && item.imageUrls.length > 0) {
+            try {
+              const uploadMap = await uploadImages(item.imageUrls, ctx)
+              item.imageUrls = item.imageUrls.map((url) => uploadMap.get(url) || url)
+            } catch (error) {
+              logger.warn(`测试推送图片上传失败: ${(error as Error).message}`)
+            }
+          }
+        }
+      } else {
+        for (const item of toPush) item.imageUrls = []
+      }
+
+      const title = `【测试推送】${customPushTitle || 'Roblox RSS 最新推送'}`
+      const markdown = convertBatchToMarkdown(toPush, title)
+
+      let pushFailed = 0
+      for (const groupId of groups) {
+        try {
+          await sendMarkdownToGroup(ctx, groupId, markdown)
+          result.pushedMessages++
+        } catch (error) {
+          pushFailed++
+          logger.warn(`测试推送到群 ${groupId} 失败: ${(error as Error).message}`)
+        }
+      }
+
+      if (pushFailed === groups.length) {
+        result.failedSources++
+        result.details.push({
+          source: source.name,
+          status: 'push-failed',
+          items: toPush.length,
+          error: '所有目标群推送失败',
+        })
+      } else {
+        result.okSources++
+        result.details.push({ source: source.name, status: 'ok', items: toPush.length })
+      }
+    } catch (error) {
+      result.failedSources++
+      result.details.push({
+        source: source.name,
+        status: 'error',
+        items: 0,
+        error: (error as Error).message,
+      })
+      logger.warn(`测试推送：源 [${source.name}] 抓取失败: ${(error as Error).message}`)
+    }
+  }
+
+  logger.info(
+    `测试推送完成：成功源 ${result.okSources}/${result.totalSources}，` +
+    `无内容 ${result.emptySources}，失败 ${result.failedSources}，发送消息 ${result.pushedMessages} 条`,
+  )
+  return result
+}
+
 /**
  * 运行调度循环
  */
@@ -144,6 +291,12 @@ async function performCheck(ctx: Context): Promise<void> {
     const settings = await getSettings(ctx)
 
     if (!settings.enabled) return
+
+    // 免打扰时段：暂停推送，新内容保持未发送状态，待时段结束后再推送
+    if (isInQuietHours(settings.quietStart, settings.quietEnd)) {
+      logger.debug(`当前处于免打扰时段（${settings.quietStart}:00-${settings.quietEnd}:00），跳过本轮推送`)
+      return
+    }
 
     const sources = await getEnabledSources(ctx)
     const groups = await getEnabledGroups(ctx)
@@ -190,7 +343,28 @@ async function performCheck(ctx: Context): Promise<void> {
 
         logger.info(`源 [${source.name}] 发现 ${newItems.length} 条新内容`)
 
-        const toPush = newItems.slice(0, settings.maxItemsPerPush)
+        // 关键词过滤：白名单仅保留命中项，黑名单移除命中项
+        let candidateItems = newItems
+        if (settings.filterMode !== 'off' && settings.filterKeywords.length > 0) {
+          candidateItems = newItems.filter((item) =>
+            passesKeywordFilter(item, settings.filterMode, settings.filterKeywords),
+          )
+          const filteredOut = newItems.filter((item) => !candidateItems.includes(item))
+          if (filteredOut.length > 0) {
+            logger.debug(`源 [${source.name}] 关键词过滤(${settings.filterMode})跳过 ${filteredOut.length} 条内容`)
+            // 被过滤的条目记录为已发送，避免后续轮次重复处理
+            for (const item of filteredOut) {
+              await recordSentItem(ctx, source.id, item.guid)
+            }
+          }
+        }
+
+        if (candidateItems.length === 0) {
+          logger.debug(`源 [${source.name}] 过滤后无可推送内容`)
+          continue
+        }
+
+        const toPush = candidateItems.slice(0, settings.maxItemsPerPush)
 
         // 图片上传到图床
         if (imageUploadEnabled) {

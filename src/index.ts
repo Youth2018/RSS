@@ -10,6 +10,7 @@ import {
   getSettings,
   updateSettings,
   addSource,
+  generateSourceId,
   removeSource,
   toggleSource,
   getSource,
@@ -21,15 +22,20 @@ import {
   getAllGroups,
   getEnabledGroups,
   getSentCount,
+  addFilterKeywords,
+  removeFilterKeywords,
+  clearFilterKeywords,
 } from './storage'
-import { startScheduler, stopScheduler, restartScheduler, getStatus, triggerManualCheck, configureScheduler } from './scheduler'
-import { formatSourceList, formatGroupList, formatStatus } from './markdown'
+import { startScheduler, stopScheduler, restartScheduler, getStatus, triggerManualCheck, configureScheduler, performTestPush, TestPushResult } from './scheduler'
+import { formatSourceList, formatGroupList, formatStatus, formatFilterSettings, formatTestPushResult } from './markdown'
+import { normalizeKeywords } from './filter'
+import { FilterMode, PluginSettings } from './types'
 
 /** 插件名称 */
 export const name = 'rss-subscribe'
 
 /** 插件依赖注入声明 */
-export const inject = ['database']
+export const inject = { required: ['database'], optional: ['notifier'] }
 
 /** 单个RSS源配置 */
 interface RSSSourceConfig {
@@ -61,6 +67,18 @@ export interface Config {
   sources: Record<string, RSSSourceConfig>
   /** 推送目标群ID列表 */
   groupIds: string[]
+  /** 关键词过滤模式 */
+  filterMode: FilterMode
+  /** 过滤关键词列表 */
+  filterKeywords: string[]
+  /** 免打扰开始时段（0-23，-1禁用） */
+  quietStart: number
+  /** 免打扰结束时段（0-23，-1禁用） */
+  quietEnd: number
+  /** 测试推送开关（开启并保存后立即抓取各源最近3条推送到测试群） */
+  testPush: boolean
+  /** 测试推送目标群ID（留空则使用推送目标群ID列表） */
+  testGroupIds: string[]
 }
 
 /** 单个RSS源的Schema定义 */
@@ -132,6 +150,38 @@ export const Config: Schema<Config> = Schema.intersect([
       .description('推送目标群ID列表（QQ群的group_openid）')
       .default([]),
   }),
+  Schema.object({
+    filterMode: Schema.union([
+      Schema.const('off').description('关闭（推送全部）'),
+      Schema.const('include').description('白名单（仅推送命中关键词的内容）'),
+      Schema.const('exclude').description('黑名单（过滤命中关键词的内容）'),
+    ])
+      .description('关键词过滤模式')
+      .default('off'),
+    filterKeywords: Schema.array(Schema.string())
+      .description('过滤关键词列表（匹配标题/正文/作者，忽略大小写；留空则由指令管理）')
+      .default([]),
+  }),
+  Schema.object({
+    quietStart: Schema.number()
+      .description('免打扰开始时段（0-23小时，-1表示禁用）')
+      .min(-1)
+      .max(23)
+      .default(-1),
+    quietEnd: Schema.number()
+      .description('免打扰结束时段（0-23小时，-1表示禁用）')
+      .min(-1)
+      .max(23)
+      .default(-1),
+  }),
+  Schema.object({
+    testPush: Schema.boolean()
+      .description('🚀 测试推送：开启并保存后，立即抓取各RSS源最近3条内容推送到测试群（验证后请关闭）')
+      .default(false),
+    testGroupIds: Schema.array(Schema.string())
+      .description('测试推送目标群ID（留空则使用上方的"推送目标群ID列表"）')
+      .default([]),
+  }),
 ])
 
 /**
@@ -165,13 +215,22 @@ export function apply(ctx: Context, config: Config) {
       await syncGroupsFromConfig(ctx, config)
 
       // 应用配置到数据库设置
-      await updateSettings(ctx, {
+      const settingsUpdate: Partial<PluginSettings> = {
         checkInterval: config.checkInterval,
         requestTimeout: config.requestTimeout,
         maxRetries: config.maxRetries,
         maxItemsPerPush: config.maxItemsPerPush,
         enabled: true,
-      })
+        filterMode: config.filterMode,
+        quietStart: config.quietStart,
+        quietEnd: config.quietEnd,
+      }
+      // 仅当配置中提供了关键词时才覆盖数据库，否则保留由指令管理的关键词
+      const configKeywords = normalizeKeywords(config.filterKeywords || [])
+      if (configKeywords.length > 0) {
+        settingsUpdate.filterKeywords = configKeywords
+      }
+      await updateSettings(ctx, settingsUpdate)
 
       // 延迟启动调度器，确保数据库已就绪
       if (config.autoStart) {
@@ -185,6 +244,13 @@ export function apply(ctx: Context, config: Config) {
         }, 3000)
       } else {
         logger.info('RSS订阅插件已就绪（手动启动模式）')
+      }
+
+      // 测试推送：配置开关开启时，延迟执行一次（等待Bot连接就绪）
+      if (config.testPush) {
+        setTimeout(() => {
+          runTestPush('config').catch((e) => logger.error(`测试推送失败: ${(e as Error).message}`))
+        }, 4000)
       }
     } catch (error) {
       logger.error(`插件初始化失败: ${(error as Error).message}`)
@@ -208,38 +274,49 @@ export function apply(ctx: Context, config: Config) {
     const existingSources = await getAllSources(ctx)
     const existingMap = new Map(existingSources.map(s => [s.id, s]))
     const existingUrlMap = new Map(existingSources.map(s => [s.url, s]))
+    const usedIds = new Set(existingSources.map(s => s.id))
 
-    for (const [id, sourceConfig] of Object.entries(configSources)) {
-      if (existingMap.has(id)) {
+    for (const [rawKey, sourceConfig] of Object.entries(configSources)) {
+      // 跳过控制台中产生的无效条目（缺少URL），避免初始化报错
+      const url = (sourceConfig?.url || '').trim()
+      if (!url) {
+        logger.warn(`跳过无效的RSS源配置项 [${rawKey || '(空)'}]：URL为空`)
+        continue
+      }
+      const name = (sourceConfig.name || '').trim() || url
+      const enabled = sourceConfig.enabled ?? true
+      const id = rawKey.trim()
+
+      if (id && existingMap.has(id)) {
         // 更新已有源的启用状态和名称
-        await ctx.database.set('rss_source', { id }, {
-          enabled: sourceConfig.enabled,
-          name: sourceConfig.name,
-          url: sourceConfig.url,
-        })
+        await ctx.database.set('rss_source', { id }, { enabled, name, url })
         // 更新URL映射（URL可能被修改）
-        existingUrlMap.set(sourceConfig.url, { id, name: sourceConfig.name, url: sourceConfig.url, enabled: sourceConfig.enabled } as any)
+        existingUrlMap.set(url, { id, name, url, enabled } as any)
       } else {
         // 检查URL是否已被其他源使用（包括本轮已添加的源）
-        const conflictSource = existingUrlMap.get(sourceConfig.url)
+        const conflictSource = existingUrlMap.get(url)
         if (conflictSource) {
-          logger.warn(`跳过添加RSS源 [${sourceConfig.name}]：URL已被源 [${conflictSource.name}] 使用 (${sourceConfig.url})`)
+          logger.warn(`跳过添加RSS源 [${name}]：URL已被源 [${conflictSource.name}] 使用 (${url})`)
           continue
         }
+
+        // 生成安全且唯一的ID（兼容空key/中文名/重复key）
+        const finalId = id && !usedIds.has(id) ? id : generateSourceId(name, usedIds)
 
         // 添加新源
         try {
           await ctx.database.create('rss_source', {
-            id,
-            name: sourceConfig.name,
-            url: sourceConfig.url,
-            enabled: sourceConfig.enabled,
+            id: finalId,
+            name,
+            url,
+            enabled,
           })
+          usedIds.add(finalId)
           // 添加成功后更新URL映射，防止后续源重复添加
-          existingUrlMap.set(sourceConfig.url, { id, name: sourceConfig.name, url: sourceConfig.url, enabled: sourceConfig.enabled } as any)
-          existingMap.set(id, { id, name: sourceConfig.name, url: sourceConfig.url, enabled: sourceConfig.enabled } as any)
+          existingUrlMap.set(url, { id: finalId, name, url, enabled } as any)
+          existingMap.set(finalId, { id: finalId, name, url, enabled } as any)
         } catch (e) {
-          logger.warn(`添加RSS源 [${sourceConfig.name}] 失败: ${(e as Error).message}`)
+          logger.warn(`添加RSS源 [${name}] 失败: ${(e as Error).message}`)
         }
       }
     }
@@ -302,6 +379,45 @@ export function apply(ctx: Context, config: Config) {
 
     // 策略2：回退为普通消息发送
     await session.send(markdown)
+  }
+
+  // ==================== 测试推送辅助 ====================
+
+  /**
+   * 执行测试推送，并尽量通过控制台 notifier 提供加载状态/结果反馈
+   * @param trigger 触发来源：config=配置开关，command=指令
+   */
+  async function runTestPush(trigger: 'config' | 'command'): Promise<TestPushResult> {
+    // 控制台加载提示（notifier 服务存在时）
+    let notifier: any = null
+    try {
+      notifier = (ctx as any).notifier?.create?.('⏳ 正在执行测试推送，请稍候...')
+    } catch {
+      notifier = null
+    }
+
+    logger.info(`测试推送已触发（来源：${trigger === 'config' ? '配置开关' : '指令'}）`)
+
+    try {
+      const result = await performTestPush(ctx, {
+        groupIds: config.testGroupIds && config.testGroupIds.length > 0 ? config.testGroupIds : undefined,
+        perSource: 3,
+      })
+      const summary = `测试推送完成：成功 ${result.okSources}/${result.totalSources} 个源，` +
+        `发送 ${result.pushedMessages} 条消息到 ${result.groups.length} 个群` +
+        (result.failedSources > 0 ? `（失败 ${result.failedSources} 个源）` : '')
+      try {
+        notifier?.update?.(summary)
+      } catch { /* ignore notifier errors */ }
+      return result
+    } catch (error) {
+      const msg = `测试推送失败: ${(error as Error).message}`
+      logger.error(msg)
+      try {
+        notifier?.update?.(msg)
+      } catch { /* ignore notifier errors */ }
+      throw error
+    }
   }
 
   // ==================== 命令注册 ====================
@@ -388,6 +504,26 @@ export function apply(ctx: Context, config: Config) {
         return 'RSS检查已触发，请查看日志了解结果'
       } catch (error) {
         return `检查失败: ${(error as Error).message}`
+      }
+    })
+
+  // rss test - 测试推送
+  rssCmd.subcommand('.test', '测试推送：抓取各源最近3条内容推送到测试群')
+    .alias('测试推送')
+    .action(async ({ session }) => {
+      try {
+        if (session) {
+          await session.send('⏳ 正在执行测试推送，请稍候...')
+        }
+        const result = await runTestPush('command')
+        const md = formatTestPushResult(result)
+        if (session) {
+          await sendMarkdown(session, md)
+          return
+        }
+        return md
+      } catch (error) {
+        return `测试推送失败: ${(error as Error).message}`
       }
     })
 
@@ -555,6 +691,126 @@ export function apply(ctx: Context, config: Config) {
         return `删除RSS源失败: ${sourceId}`
       } catch (error) {
         return `删除失败: ${(error as Error).message}`
+      }
+    })
+
+  // ==================== 内容过滤命令 ====================
+
+  // rss filter 子命令组
+  const filterCmd = rssCmd.subcommand('.filter', '关键词过滤管理')
+
+  // rss filter - 查看当前过滤设置
+  filterCmd
+    .alias('过滤')
+    .action(async ({ session }) => {
+      try {
+        const settings = await getSettings(ctx)
+        const md = formatFilterSettings({
+          filterMode: settings.filterMode,
+          filterKeywords: settings.filterKeywords,
+          quietStart: settings.quietStart,
+          quietEnd: settings.quietEnd,
+        })
+        if (session) {
+          await sendMarkdown(session, md)
+        } else {
+          return md
+        }
+      } catch (error) {
+        return `获取过滤设置失败: ${(error as Error).message}`
+      }
+    })
+
+  // rss filter mode - 设置过滤模式
+  filterCmd.subcommand('.mode <mode:string>', '设置过滤模式（off/include/exclude）')
+    .alias('过滤模式')
+    .action(async ({ }, mode: string) => {
+      const valid: FilterMode[] = ['off', 'include', 'exclude']
+      if (!valid.includes(mode as FilterMode)) {
+        return '无效的模式，请使用 off（关闭）/ include（白名单）/ exclude（黑名单）'
+      }
+      try {
+        await updateSettings(ctx, { filterMode: mode as FilterMode })
+        const label = { off: '关闭', include: '白名单', exclude: '黑名单' }[mode as FilterMode]
+        return `过滤模式已设置为：${label}`
+      } catch (error) {
+        return `设置失败: ${(error as Error).message}`
+      }
+    })
+
+  // rss filter add - 添加关键词
+  filterCmd.subcommand('.add <keywords:text>', '添加过滤关键词（多个用逗号/空格分隔）')
+    .alias('添加关键词')
+    .action(async ({ }, keywords: string) => {
+      const list = (keywords || '').split(/[,，\s]+/).filter((k) => k.trim())
+      if (list.length === 0) {
+        return '请提供有效的关键词'
+      }
+      try {
+        const all = await addFilterKeywords(ctx, list)
+        return `已添加关键词，当前共 ${all.length} 个：${all.join('、')}`
+      } catch (error) {
+        return `添加失败: ${(error as Error).message}`
+      }
+    })
+
+  // rss filter remove - 移除关键词
+  filterCmd.subcommand('.remove <keywords:text>', '移除过滤关键词（多个用逗号/空格分隔）')
+    .alias('移除关键词')
+    .action(async ({ }, keywords: string) => {
+      const list = (keywords || '').split(/[,，\s]+/).filter((k) => k.trim())
+      if (list.length === 0) {
+        return '请提供有效的关键词'
+      }
+      try {
+        const all = await removeFilterKeywords(ctx, list)
+        return all.length > 0
+          ? `已移除关键词，剩余 ${all.length} 个：${all.join('、')}`
+          : '已移除关键词，当前关键词列表为空'
+      } catch (error) {
+        return `移除失败: ${(error as Error).message}`
+      }
+    })
+
+  // rss filter clear - 清空关键词
+  filterCmd.subcommand('.clear', '清空所有过滤关键词')
+    .alias('清空关键词')
+    .action(async () => {
+      try {
+        await clearFilterKeywords(ctx)
+        return '已清空所有过滤关键词'
+      } catch (error) {
+        return `清空失败: ${(error as Error).message}`
+      }
+    })
+
+  // rss quiet - 设置免打扰时段
+  rssCmd.subcommand('.quiet <start:string> [end:string]', '设置免打扰时段（如：rss quiet 23 7；关闭：rss quiet off）')
+    .alias('免打扰')
+    .action(async ({ }, start: string, end?: string) => {
+      try {
+        if (start === 'off' || start === '关闭' || start === '-1') {
+          await updateSettings(ctx, { quietStart: -1, quietEnd: -1 })
+          return '已关闭免打扰时段'
+        }
+
+        const startHour = Number(start)
+        const endHour = Number(end)
+        if (
+          !Number.isInteger(startHour) || !Number.isInteger(endHour) ||
+          startHour < 0 || startHour > 23 || endHour < 0 || endHour > 23
+        ) {
+          return '请输入有效的时段（0-23的整数），例如：rss quiet 23 7'
+        }
+        if (startHour === endHour) {
+          return '开始与结束时段不能相同'
+        }
+
+        await updateSettings(ctx, { quietStart: startHour, quietEnd: endHour })
+        const pad = (n: number) => String(n).padStart(2, '0')
+        return `已设置免打扰时段：${pad(startHour)}:00 - ${pad(endHour)}:00（该时段内暂停推送）`
+      } catch (error) {
+        return `设置失败: ${(error as Error).message}`
       }
     })
 
